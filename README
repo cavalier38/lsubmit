@@ -1,0 +1,12 @@
+
+ lunar-dev-tools -- a set of lunar-related development tools
+
+
+Lunar-dev-tools contains some non-core tools for various development tasks.
+Here's a short overview:
+
+lsubmit -- moonbase development assistant
+
+	lsubmit is a tool to easy common tasks which come with git, the
+	moonbase and github.
+

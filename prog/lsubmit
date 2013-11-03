@@ -1,0 +1,370 @@
+#!/bin/bash
+############################################################
+#                                                          #
+# lsubmit - Lunar development helper                       #
+#                                                          #
+############################################################
+#                                                          #
+# Copyright Peter de Ridder 2013 under GPLv2               #
+#                                                          #
+############################################################
+
+ALL_REPOS=(moonbase-core moonbase-other moonbase-efl moonbase-gnome moonbase-gnome3 moonbase-kde moonbase-xfce moonbase-xorg)
+
+help()  {
+  cat  <<  EOF
+Lsubmit -- A lunar related program to help with moonbase development
+
+Usage:          lsubmit [general options] command [command parameters]
+
+General options:
+
+-d  |  --debug                  Enables debug messages
+-h  |  --help                   Displays this help text
+-v  |  --verbose                Increases the level of message output
+
+Commands:
+
+init                      Initializes a moonbase from your github account
+list    [repo(s)]         List all open pull requests
+merge   pull-req          Merges a pull request into the current branch
+zlocal  [@base] [branch]  Copies the changed modules from the branch to zlocal
+EOF
+  exit  1
+}
+
+check ()
+{
+  debug_msg "check ($@)"
+
+  local prog
+
+  for PROG in "$@" ; do
+    if ! type "$PROG" &> /dev/null ; then
+      error_message "Missing program '$PROG'. Make sure it is installed 'lin $PROG'"
+      exit 1
+    fi
+  done
+}
+
+valid_repo ()
+{
+  debug_msg "valid_repo ($@)"
+
+  case "$1" in
+    moonbase-core|moonbase-other|moonbase-efl|moonbase-gnome|moonbase-gnome3|moonbase-kde|moonbase-xfce|moonbase-xorg)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+maybe_repo ()
+{
+  debug_msg "maybe_repo ($@)"
+
+  local STRIP
+
+  STRIP="$(basename "$1")"
+  STRIP="${STRIP%.git}"
+  STRIP="${STRIP#moonbase-}"
+
+  verbose_msg "Testing for repo '$STRIP'"
+
+  case "$STRIP" in
+    core)
+      CORE_REPO="$1"
+      MOONBASE_REPO="moonbase-$STRIP"
+      verbose_msg "Core repo '$CORE_REPO'"
+      ;;
+    other)
+      OTHER_REPO="$1"
+      MOONBASE_REPO="moonbase-$STRIP"
+      verbose_msg "Other repo '$OTHER_REPO'"
+      ;;
+    efl)
+      EFL_REPO="$1"
+      MOONBASE_REPO="moonbase-$STRIP"
+      verbose_msg "EFL repo '$EFL_REPO'"
+      ;;
+    gnome)
+      GNOME_REPO="$1"
+      MOONBASE_REPO="moonbase-$STRIP"
+      verbose_msg "Gnome repo '$GNOME_REPO'"
+      ;;
+    gnome3)
+      GNOME3_REPO="$1"
+      MOONBASE_REPO="moonbase-$STRIP"
+      verbose_msg "Gnome 3 repo '$GNOME3_REPO'"
+      ;;
+    kde)
+      KDE_REPO="$1"
+      MOONBASE_REPO="moonbase-$STRIP"
+      verbose_msg "KDE repo '$KDE_REPO'"
+      ;;
+    xfce)
+      XFCE_REPO="$1"
+      MOONBASE_REPO="moonbase-$STRIP"
+      verbose_msg "Xfce repo '$XFCE_REPO'"
+      ;;
+    xorg)
+      XORG_REPO="$1"
+      MOONBASE_REPO="moonbase-$STRIP"
+      verbose_msg "Core repo '$XORG_REPO'"
+      ;;
+    *)
+      debug_msg "Repository '$XORG_REPO' not recognised"
+      return 1
+      ;;
+  esac
+}
+
+examine_location ()
+{
+  debug_msg "examine_location ($@)"
+
+  local MAYBE REPO REPOS
+
+  MAYBE="$PWD"
+
+  if [ -n "$1" ] ; then
+    if [ -d "$1/.git" ] ; then
+      MAYBE="$1"
+    elif [ -d "$1.git" ] ; then
+      MAYBE="$1.git"
+    elif [ -d "moonbase-$1" ] ; then
+      MAYBE="moonbase-$1"
+    elif [ -d "moonbase-$1.git" ] ; then
+      MAYBE="moonbase-$1.git"
+    else
+      return 1
+    fi
+  fi
+
+  MAYBE="$(realpath -m -s "$MAYBE")"
+
+  verbose_msg "Examine location '$MAYBE'"
+
+  if [ -d "$MAYBE/.git" ] ; then
+    SINGLE_REPO="$MAYBE"
+    maybe_repo "$SINGLE_REPO"
+    return 0
+  fi
+
+  REPOS="$(find $MAYBE -mindepth 2 -maxdepth 2 -name .git -printf '%h\n')"
+  if [ -n "$REPOS" ] ; then
+    for REPO in $REPOS ; do
+      if maybe_repo "$REPO" ; then
+        MULTI_REPO+="$REPO"$'\n'
+	unset MOONBASE_REPO
+      fi
+    done
+    [ -n "$MULTI_REPO" ]
+    return
+  fi
+
+  while [ "${#MAYBE}" -gt 1 ] ; do
+    if [ -d "$MAYBE/.git" ] ; then
+      SINGLE_REPO="$MAYBE"
+      maybe_repo "$SINGLE_REPO"
+      return 0
+    fi
+    MAYBE="$(dirname $MAYBE)"
+  done
+}
+
+github_authorize ()
+{
+  debug_msg "github_authorize ($@)"
+
+  [ -n "${TOKEN:=$GITHUB_TOKEN}" ] && return
+
+  [ -z "$GITHUB_USER" ] && read -r -p "Github username: " GITHUB_USER
+  if [ -n "$CLIENT_ID" -a -n "$CLIENT_SECRET" ] ; then
+    TOKEN="$(curl -s -u "$GITHUB_USER" -X PUT "https://api.github.com/authorizations/clients/$CLIENT_ID" --data '{"client_secret":"'"$CLIENT_SECRET"'","note":"lsubmit"}' | jshon -e "token" -u)"
+  else
+    TOKEN="$(curl -s -u "$GITHUB_USER" "https://api.github.com/authorizations" --data '{"note":"lsubmit","note_url":"http://lunar-linux.org"}' | jshon -e "token" -u)"
+  fi
+
+  echo "GITHUB_TOKEN='$TOKEN'" >> "$USER_CONFIG"
+}
+
+init_repo ()
+{
+  debug_msg "init_repo ($@)"
+
+  local LREPO
+
+  LREPO="${1#moonbase-}"
+
+  git clone "git@github.com:$GITHUB_USER/$1" "$LREPO" || return
+
+  (
+    cd "$LREPO"
+
+    git remote add upstream "git://github.com/lunar-linux/$1"  &&
+    git fetch upstream  &&
+    git checkout -b upstream_master upstream/master
+
+    git checkout master
+  )
+}
+
+init ()
+{
+  debug_msg "init ($@)"
+
+  local REPO
+
+  check git
+
+  [ -z "${GITHUB_USER:=$1}" ] && read -r -p "Github username: " GITHUB_USER
+
+  for REPO in "${ALL_REPOS[@]}" ; do
+    init_repo "$REPO"
+  done
+}
+
+zlocal ()
+{
+  debug_msg "zlocal ($@)"
+
+  local MERGE_BASE MERGE_HEAD
+
+  check git
+
+  if [ -n "$1" ] && examine_location "$1" ; then
+    shift
+  else
+    examine_location
+  fi
+
+  if [ -z "$SINGLE_REPO" ] ; then
+    error_message "Repository could not be found"
+    exit 1
+  fi
+
+  cd "$SINGLE_REPO"
+
+  if [ "$ZLOCAL_OVERRIDES" != on ] ; then
+    message "Applied changes won't have effect. Enable zlocal first: lunar set ZLOCAL_OVERRIDES on"
+  fi
+
+  if [ "${1::1}" = '@' ] ; then
+    MERGE_BASE="${1:1}"
+    shift
+  fi
+  MERGE_HEAD="${1:-HEAD}"
+  MERGE_BASE="$(git merge-base "${MERGE_BASE:-master}" "$MERGE_HEAD")"
+  # Can't use " around $1 as this is an optional arg
+  MODULES_PATH="$(git diff --numstat "$MERGE_BASE" $1 | cut -f 3 | sed 's:\(/[^/]*\.d\)\?/[^/]*$::' | sort -u)"
+  if [ -z "$MODULES_PATH" ] ; then
+    message 'No modules in this branch'
+    return 0
+  fi
+  MODULES="$(echo "$MODULES_PATH" | sed 's:^.*/::')"
+  message 'The following modules will be installed:'
+  echo "$MODULES"
+  for MODULE in $MODULES ; do
+    if [ -d "$MOONBASE/zlocal/$MODULE" ] ; then
+      query 'You want to overwrite?' y || return 0
+      rm -R "$MOONBASE/zlocal/$MODULE"
+    fi
+  done
+  cp -R -t "$MOONBASE/zlocal" $MODULES_PATH
+}
+
+list ()
+{
+  debug_msg "list ($@)"
+
+  local REPO
+
+  check curl
+
+  examine_location
+
+  if [ -n "$MOONBASE_REPO" ] ; then
+    set -- "$MOONBASE_REPO"
+  elif [ "$#" -eq 0 ] ; then
+    set -- "${ALL_REPOS[@]}"
+  fi
+
+  verbose_msg "Listing '$@'"
+
+  github_authorize
+
+  while [ "$#" -gt 0 ] ; do
+    REPO="$1"
+    shift || break
+    if ! valid_repo "$REPO" ; then
+      REPO="moonbase-$REPO"
+      valid_repo "$REPO" || continue
+    fi
+
+    curl -s -H "Authorization: token $TOKEN" "https://api.github.com/repos/lunar-linux/$REPO/pulls" | jshon -Q -a -e html_url -u -p -e title -u -p -s "" -u -p -e body -u -s "" -u
+  done | view_file
+}
+
+merge ()
+{
+  debug_msg "merge ($@)"
+
+  local LABEL BRANCH REPO TITLE
+
+  check curl git
+
+  examine_location
+
+  if [ -z "$MOONBASE_REPO" ] ; then
+    error_message "Repository could not be found"
+    exit 1
+  fi
+
+  github_authorize
+
+  PULL=($(curl -s -H "Authorization: token $TOKEN" "https://api.github.com/repos/lunar-linux/$MOONBASE_REPO/pulls/$1" | jshon -e head -e label -u -p -e ref -u -p -e repo -e git_url -u -p -p -p -e title -u))
+
+  git pull --no-ff --no-commit "${PULL[2]}" "${PULL[1]}" &&
+  git commit -m "Merge pull request #$1 from ${PULL[0]/://}"$'\n\n'"${PULL[*]:3}"
+}
+
+. /etc/lunar/config
+. "$BOOTSTRAP"
+
+USER_CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/lsubmit"
+if [ -f "$USER_CONFIG" ] ; then
+  . "$USER_CONFIG"
+fi
+
+IFS=$'\n'
+
+GETOPT_ARGS="$(getopt -q -n lsubmit -o "dhv" -l "debug,help,verbose" -- "$@")"
+
+if [ -z "$?" ] ; then
+  help | view_file
+  exit
+else
+  eval set -- "$GETOPT_ARGS"
+
+  while true ; do
+    case "$1" in
+      -d|--debug       ) (( LUNAR_DEBUG++ )) ; export LUNAR_DEBUG ; shift   ;;
+      -h|--help        ) help ;                                     exit 0  ;;
+      -v|--verbose     ) export VERBOSE="on" ;                      shift   ;;
+      --) shift ; break ;;
+      *) help ; exit 1 ;;
+    esac
+  done
+
+  case "$1" in
+    init       ) shift && init "$@"   ;;
+    zlocal     ) shift && zlocal "$@" ;;
+    list       ) shift && list "$@"   ;;
+    merge      ) shift && merge "$@"  ;;
+    *) help | view_file ;; 
+  esac
+fi
+
